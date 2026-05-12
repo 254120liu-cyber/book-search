@@ -171,6 +171,17 @@ def api_health():
         "time": int(time.time()),
     })
 
+@app.route("/api/debug")
+def api_debug():
+    with _lock:
+        items = {k: {"has_query": "query" in v, "has_result": v.get("result") is not None} for k, v in _pending.items()}
+    return jsonify({
+        "relay_online": _relay_online(),
+        "last_ping": _last_ping,
+        "pending_count": len(_pending),
+        "pending": items,
+    })
+
 
 @app.route("/")
 def index():
