@@ -163,7 +163,7 @@ def api_search():
         return jsonify({"query": q, "count": len(books), "results": books})
     except Exception as e:
         logger.error(f"搜索异常: {e}")
-        return jsonify({"error": "搜索服务暂时不可用，请稍后重试"}), 500
+        return jsonify({"error": f"搜索失败: {str(e)[:200]}"}), 500
 
 
 @app.route("/api/book/<book_id>")
