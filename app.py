@@ -115,9 +115,12 @@ def search_books(query, limit=20):
             with _lock:
                 info = _pending.pop(req_id, {})
             result = info.get("result")
-            if result:
+            if result is not None:
                 logger.info(f"Z-Library(PC): {len(result)} 结果")
                 return result[:limit]
+            # result 为空列表说明搜了但没找到——直接返回空
+            logger.info(f"Z-Library(PC): 0 结果")
+            return []
 
     # 备用 Open Library
     try:
@@ -127,7 +130,8 @@ def search_books(query, limit=20):
             return results
         raise Exception("OpenLibrary 返回空结果")
     except Exception as e:
-        raise Exception(f"所有搜索源不可用: {e}")
+        logger.warning(f"搜索异常: {e}")
+        return []
 
 
 # ---------- Flask API ----------
