@@ -170,7 +170,9 @@ def search_books(query, limit=20):
                 logger.info(f"Z-Lib 搜索成功: {mirror}, {len(results)} 结果")
                 return results
         except Exception as e:
-            msg = f"Z-Lib {mirror}: {type(e).__name__}"
+            ename = type(e).__name__
+            detail = str(e)[:150]
+            msg = f"Z-Lib {mirror}: {ename} - {detail}"
             errors.append(msg)
             logger.warning(msg)
 
