@@ -15,13 +15,19 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ---------- 配置 ----------
-AA_MIRRORS = [
-    "https://annas-archive.gs",
-    "https://annas-archive.se",
-    "https://annas-archive.li",
-    "https://annas-archive.org",
+SEARCH_TIMEOUT = 15
+
+# 搜索引擎列表（按优先级）
+SEARCH_SOURCES = [
+    {
+        "name": "Open Library",
+        "url": "https://openlibrary.org/search.json",
+    },
+    {
+        "name": "Google Books",
+        "url": "https://www.googleapis.com/books/v1/volumes",
+    },
 ]
-SEARCH_TIMEOUT = 30
 
 # 易支付配置（后续填入）
 YIPAY_PID = ""
@@ -31,91 +37,102 @@ YIPAY_API = "https://api.epay.ai/"
 
 # ========== 搜索引擎 ==========
 
-def _session():
-    s = requests.Session()
-    s.headers.update(
-        {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-        }
+def _search_openlib(query, limit=20):
+    """搜索 Open Library JSON API"""
+    resp = requests.get(
+        "https://openlibrary.org/search.json",
+        params={"q": query, "limit": limit, "language": "chi,eng"},
+        timeout=SEARCH_TIMEOUT,
     )
-    s.timeout = SEARCH_TIMEOUT
-    return s
-
-
-def _search_aa_mirror(query, mirror, limit=20):
-    """在单个 Anna's Archive 镜像上搜索"""
-    s = _session()
-    url = f"{mirror}/search"
-    resp = s.get(url, params={"q": query})
     resp.raise_for_status()
-
-    soup = BeautifulSoup(resp.text, "html.parser")
+    data = resp.json()
     results = []
 
-    for a in soup.select("a[href*='/md5/']"):
-        if len(results) >= limit:
-            break
-        title = a.get_text(strip=True)
-        href = a.get("href", "")
-        if not title or len(title) < 3:
-            continue
-
-        parent = a.find_parent("div")
-        info = parent.get_text("\n", strip=True) if parent else ""
-
-        author = "未知"
-        rest = info.replace(title, "", 1)
-        lines = [l.strip() for l in rest.split("\n") if l.strip() and len(l.strip()) > 2]
-        if lines:
-            first = lines[0]
-            if not re.search(r"MB|GB|KB|PDF|EPUB|TXT|MOBI|\d{4}", first, re.I):
-                author = first[:60]
-            elif len(lines) > 1:
-                author = lines[1][:60]
-
+    for doc in data.get("docs", []):
+        title = doc.get("title", "未知书名")
+        author = ", ".join(doc.get("author_name", ["未知"]))[:80]
+        year = str(doc.get("first_publish_year", ""))
         filetype = "?"
-        for fmt in ["PDF", "EPUB", "MOBI", "AZW3", "DJVU", "TXT", "FB2"]:
-            if fmt.lower() in info.lower():
-                filetype = fmt
+        # Open Library 有各种格式
+        if doc.get("has_fulltext"):
+            filetype = "PDF"
+        for fmt_name in doc.get("ebook_access", "").split(","):
+            if "pdf" in fmt_name.lower():
+                filetype = "PDF"
+                break
+            if "epub" in fmt_name.lower():
+                filetype = "EPUB"
                 break
 
-        size = "未知"
-        m = re.search(r"(\d+\.?\d*\s*(MB|GB|KB))", info, re.I)
-        if m:
-            size = m.group(1).upper()
-
-        year = ""
-        m = re.search(r"\b(19\d{2}|20\d{2})\b", info)
-        if m:
-            year = m.group(1)
-
-        url = href if href.startswith("http") else mirror + href
+        # 生成下载链接
+        cover_id = doc.get("cover_i", "")
+        olid = doc.get("edition_key", [""])[0] if doc.get("edition_key") else ""
+        url = f"https://openlibrary.org/books/{olid}" if olid else f"https://openlibrary.org/search?q={query}"
 
         results.append({
-            "title": title,
+            "title": title[:100],
             "author": author,
             "filetype": filetype,
-            "filesize": size,
+            "filesize": "未知",
             "year": year,
             "url": url,
         })
+        if len(results) >= limit:
+            break
+
+    return results
+
+
+def _search_google_books(query, limit=20):
+    """搜索 Google Books API"""
+    resp = requests.get(
+        "https://www.googleapis.com/books/v1/volumes",
+        params={"q": query, "maxResults": limit, "langRestrict": "zh-CN,en"},
+        timeout=SEARCH_TIMEOUT,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    results = []
+
+    for item in data.get("items", []):
+        info = item.get("volumeInfo", {})
+        title = info.get("title", "未知书名")
+        author = ", ".join(info.get("authors", ["未知"]))[:80]
+        year = info.get("publishedDate", "")[:4]
+        filetype = "EPUB" if info.get("accessInfo", {}).get("epub", {}).get("isAvailable") else "?"
+
+        # Google Books 链接
+        url = info.get("infoLink", f"https://books.google.com/?q={query}")
+
+        results.append({
+            "title": title[:100],
+            "author": author,
+            "filetype": filetype,
+            "filesize": "未知",
+            "year": year,
+            "url": url,
+        })
+        if len(results) >= limit:
+            break
 
     return results
 
 
 def search_books(query, limit=20):
-    """搜索电子书，自动切换可用数据源"""
+    """搜索电子书，自动切换数据源"""
     errors = []
-    for mirror in AA_MIRRORS:
+    for src in SEARCH_SOURCES:
         try:
-            results = _search_aa_mirror(query, mirror, limit)
+            if "openlibrary" in src["url"]:
+                results = _search_openlib(query, limit)
+            else:
+                results = _search_google_books(query, limit)
+
             if results:
-                logger.info(f"搜索成功: {mirror}, {len(results)} 结果")
+                logger.info(f"搜索成功: {src['name']}, {len(results)} 结果")
                 return results
         except Exception as e:
-            msg = f"{mirror}: {type(e).__name__}"
+            msg = f"{src['name']}: {type(e).__name__}"
             errors.append(msg)
             logger.warning(msg)
             continue
