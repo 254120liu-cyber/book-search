@@ -124,16 +124,30 @@ def _parse_book(title, href, info, domain):
 
 def search_zlib(query, limit=20):
     """搜索 Z-Library，自动切换域名"""
+    errors = []
     for domain in ZLIB_DOMAINS:
         try:
             results = _search_one_domain(query, domain, limit)
             if results:
                 logger.info(f"搜索成功: {domain}, q={query}, {len(results)} 结果")
                 return results
+        except requests.exceptions.Timeout as e:
+            msg = f"{domain}: 连接超时"
+            errors.append(msg)
+            logger.warning(msg)
+        except requests.exceptions.ConnectionError as e:
+            msg = f"{domain}: 无法连接 - {str(e)[:100]}"
+            errors.append(msg)
+            logger.warning(msg)
+        except requests.exceptions.HTTPError as e:
+            msg = f"{domain}: HTTP {e.response.status_code if hasattr(e, 'response') and e.response else '?'} - 服务不可用"
+            errors.append(msg)
+            logger.warning(msg)
         except Exception as e:
-            logger.warning(f"域名 {domain} 搜索失败: {e}")
-            continue
-    raise Exception("所有 Z-Library 域名均不可用")
+            msg = f"{domain}: {type(e).__name__} - {str(e)[:100]}"
+            errors.append(msg)
+            logger.warning(msg)
+    raise Exception(" | ".join(errors[:2]))
 
 
 # ========== Flask API ==========
