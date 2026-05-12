@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+shelfmark-main/
+z-library/
+Country.mmdb
+search.py
+shelfmark_key*
+.env
+venv/
