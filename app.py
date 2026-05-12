@@ -16,7 +16,13 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ---------- 配置 ----------
-ZLIB_DOMAINS = ["https://z-lib.id", "https://z-lib.fm"]
+ZLIB_DOMAINS = [
+    "https://z-lib.id",
+    "https://z-lib.fm",
+    "https://z-lib.is",
+    "https://1lib.sk",
+    "https://b-ok.org",
+]
 SEARCH_TIMEOUT = 20
 CACHE_TTL = 300  # 搜索结果缓存 5 分钟
 
@@ -33,8 +39,14 @@ def _session():
     s.headers.update(
         {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8,en-US;q=0.7",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Cache-Control": "no-cache",
+            "Sec-Ch-Ua": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+            "Sec-Ch-Ua-Mobile": "?0",
+            "Sec-Ch-Ua-Platform": '"Windows"',
+            "Upgrade-Insecure-Requests": "1",
         }
     )
     s.timeout = SEARCH_TIMEOUT
