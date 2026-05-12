@@ -3,6 +3,9 @@
 PC 通过 WebSocket 连接，接收 Z-Library 搜索请求
 PC 不在线时自动降级到 Open Library
 """
+import eventlet
+eventlet.monkey_patch()
+
 import time
 import logging
 import threading
