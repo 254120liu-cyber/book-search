@@ -1,6 +1,6 @@
 """
-搜书中继客户端 — 在你电脑上运行
-启动后自动连接 Render WebSocket，接收搜索请求 → 通过 Sakuracat 代理搜 Z-Library → 返回结果
+搜书中继客户端 v3 — HTTP 轮询模式
+每 3 秒向 Render 询问是否有搜索请求，有就搜 Z-Library 返回结果
 """
 import os
 os.environ["HTTP_PROXY"] = "http://127.0.0.1:7897"
@@ -8,12 +8,11 @@ os.environ["HTTPS_PROXY"] = "http://127.0.0.1:7897"
 
 import re
 import time
-import socketio
+import requests
 from curl_cffi import requests as curl_requests
 from bs4 import BeautifulSoup
 
-# ---------- 配置 ----------
-RENDER_URL = "https://book-search-xs91.onrender.com"
+RENDER = "https://book-search-xs91.onrender.com"
 ZLIB_DOMAINS = ["https://z-lib.id", "https://z-lib.fm"]
 
 
@@ -91,51 +90,55 @@ def search_zlib(query, limit=25):
     return []
 
 
-# ---------- WebSocket 客户端 ----------
-
-sio = socketio.Client(reconnection=True, reconnection_delay=5, reconnection_delay_max=30)
-
-
-@sio.on("connect")
-def on_connect():
-    print("[WS] 已连接 Render，等待搜索请求...", flush=True)
-
-
-@sio.on("disconnect")
-def on_disconnect():
-    print("[WS] 断开，自动重连中...", flush=True)
-
-
-@sio.on("search")
-def on_search(data):
-    req_id = data.get("id", "")
-    query = data.get("q", "")
-    print(f"[搜索] #{req_id}: {query}", flush=True)
+def post_result(req_id, results):
+    """将搜索结果发回 Render"""
     try:
-        results = search_zlib(query)
-        print(f"[搜索] #{req_id}: 返回 {len(results)} 本", flush=True)
-        sio.emit("search_result", {"id": req_id, "results": results})
+        requests.post(
+            f"{RENDER}/api/relay/result",
+            json={"id": req_id, "results": results},
+            timeout=10,
+        )
     except Exception as e:
-        print(f"[搜索] #{req_id}: 出错 {e}", flush=True)
-        sio.emit("search_result", {"id": req_id, "results": []})
+        print(f"[上报] 失败: {e}", flush=True)
 
 
 def main():
     print("=" * 50, flush=True)
-    print("搜书中继客户端 v2.0", flush=True)
-    print(f"目标: {RENDER_URL}", flush=True)
+    print("搜书中继客户端 v3 (HTTP 轮询)", flush=True)
+    print(f"目标: {RENDER}", flush=True)
     print("=" * 50, flush=True)
+
+    fail_count = 0
+
     while True:
         try:
-            print("[WS] 连接中...", flush=True)
-            sio.connect(RENDER_URL, wait_timeout=10)
-            sio.wait()
+            resp = requests.get(
+                f"{RENDER}/api/relay/ping",
+                timeout=10,
+            )
+            data = resp.json()
+            task = data.get("task")
+
+            if task:
+                req_id = task["id"]
+                query = task["q"]
+                print(f"[搜索] #{req_id}: {query}", flush=True)
+
+                results = search_zlib(query)
+                print(f"[搜索] #{req_id}: {len(results)} 本", flush=True)
+                post_result(req_id, results)
+
+            fail_count = 0
+            time.sleep(3)
+
         except KeyboardInterrupt:
-            print("\n中断退出", flush=True)
+            print("\n退出", flush=True)
             break
         except Exception as e:
-            print(f"[WS] 失败: {e}，10秒后重试", flush=True)
-            time.sleep(10)
+            fail_count += 1
+            delay = min(fail_count * 2, 30)
+            print(f"[错误] {e}，{delay}s 后重试", flush=True)
+            time.sleep(delay)
 
 
 if __name__ == "__main__":

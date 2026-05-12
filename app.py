@@ -1,28 +1,26 @@
 """
 电子书搜索后端 — Render 部署版
-PC 通过 WebSocket 连接，接收 Z-Library 搜索请求
+PC 通过 HTTP 轮询接收搜索请求 → Z-Library 搜索
 PC 不在线时自动降级到 Open Library
 """
-import eventlet
-eventlet.monkey_patch()
-
 import time
 import logging
 import threading
+import uuid
 
 import requests
 from flask import Flask, request, jsonify, send_from_directory
-from flask_socketio import SocketIO, emit
 
 app = Flask(__name__, static_folder="static")
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode="eventlet")
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ---------- 中继状态 ----------
-relay_connected = False
-relay_lock = threading.Lock()
-SEARCH_TIMEOUT = 30
+RELAY_TIMEOUT = 15  # 中继超时（秒）
+_pending = {}  # {req_id: {"query": str, "event": Event, "result": list, "ts": float}}
+_lock = threading.Lock()
+_last_ping = 0  # PC 上次在线时间
+
 
 # ---------- Open Library 备用 ----------
 
@@ -42,8 +40,8 @@ def _search_openlib(query, limit=20):
         olid = doc.get("edition_key", [""])[0] if doc.get("edition_key") else ""
         results.append({
             "title": title[:100], "author": author,
-            "filetype": "?", "filesize": "未知",
-            "year": year, "url": f"https://openlibrary.org/books/{olid}" if olid else "",
+            "filetype": "?", "filesize": "未知", "year": year,
+            "url": f"https://openlibrary.org/books/{olid}" if olid else "",
             "id": str(hash(olid or title)),
         })
         if len(results) >= limit:
@@ -51,70 +49,75 @@ def _search_openlib(query, limit=20):
     return results
 
 
-# ---------- WebSocket 中继 ----------
+# ---------- PC 中继 API ----------
 
-@socketio.on("connect")
-def on_connect():
-    global relay_connected
-    with relay_lock:
-        relay_connected = True
-    logger.info("中继已连接 (PC 在线)")
-    emit("welcome", {"msg": "connected to Render"})
+def _relay_online():
+    """PC 是否在线（15秒内有心跳）"""
+    return (time.time() - _last_ping) < RELAY_TIMEOUT
 
 
-@socketio.on("disconnect")
-def on_disconnect():
-    global relay_connected
-    with relay_lock:
-        relay_connected = False
-    logger.info("中继已断开 (PC 离线)")
+@app.route("/api/relay/ping")
+def relay_ping():
+    """PC 心跳 + 拉取待处理搜索"""
+    global _last_ping
+    _last_ping = time.time()
+
+    with _lock:
+        # 找最早的一个待处理请求
+        for req_id, item in list(_pending.items()):
+            if item.get("result") is None and item.get("query"):
+                query = item.pop("query")
+                return jsonify({"task": {"id": req_id, "q": query}})
+
+    return jsonify({"task": None})
 
 
-@socketio.on("search_result")
-def on_search_result(data):
-    """PC 返回搜索结果，存入等待队列"""
+@app.route("/api/relay/result", methods=["POST"])
+def relay_result():
+    """PC 返回搜索结果"""
+    data = request.get_json(force=True)
     req_id = data.get("id")
-    if req_id and req_id in _pending:
-        _pending[req_id]["result"] = data.get("results", [])
-        _pending[req_id]["event"].set()
+    results = data.get("results", [])
+
+    with _lock:
+        if req_id in _pending:
+            _pending[req_id]["result"] = results
+            _pending[req_id]["event"].set()
+            # 清理旧请求
+            _cleanup_old()
+    return jsonify({"ok": True})
 
 
-_pending = {}  # {req_id: {"event": threading.Event, "result": None}}
-
-
-def _relay_search(query, timeout=SEARCH_TIMEOUT):
-    """通过 WebSocket 向 PC 中继发送搜索请求"""
-    import uuid
-
-    req_id = str(uuid.uuid4())[:8]
-    event = threading.Event()
-    _pending[req_id] = {"event": event, "result": None}
-
-    socketio.emit("search", {"id": req_id, "q": query})
-
-    if event.wait(timeout=timeout):
-        result = _pending.pop(req_id, {}).get("result")
-        if result:
-            return result
-    _pending.pop(req_id, None)
-    raise Exception("中继搜索超时")
+def _cleanup_old():
+    """清理 60 秒以上的旧请求"""
+    now = time.time()
+    for req_id in list(_pending.keys()):
+        if now - _pending[req_id].get("ts", 0) > 60:
+            _pending[req_id].setdefault("event", threading.Event()).set()
+            _pending.pop(req_id, None)
 
 
 # ---------- 搜索入口 ----------
 
 def search_books(query, limit=20):
-    # 优先 WebSocket 中继 (Z-Library)
-    with relay_lock:
-        pc_online = relay_connected
+    # 优先通过 PC 中继搜索 (Z-Library)
+    if _relay_online():
+        req_id = str(uuid.uuid4())[:8]
+        event = threading.Event()
 
-    if pc_online:
-        try:
-            results = _relay_search(query)
-            if results:
-                logger.info(f"Z-Library(PC): {len(results)} 结果")
-                return results[:limit]
-        except Exception as e:
-            logger.warning(f"中继搜索失败: {e}")
+        with _lock:
+            _pending[req_id] = {
+                "query": query, "event": event, "result": None, "ts": time.time()
+            }
+
+        # 等待 PC 拉取并返回结果
+        if event.wait(timeout=RELAY_TIMEOUT):
+            with _lock:
+                info = _pending.pop(req_id, {})
+            result = info.get("result")
+            if result:
+                logger.info(f"Z-Library(PC): {len(result)} 结果")
+                return result[:limit]
 
     # 备用 Open Library
     try:
@@ -154,8 +157,11 @@ def api_search():
 
 @app.route("/api/health")
 def api_health():
-    pc = "online" if relay_connected else "offline"
-    return jsonify({"status": "ok", "relay": pc, "time": int(time.time())})
+    return jsonify({
+        "status": "ok",
+        "relay": "online" if _relay_online() else "offline",
+        "time": int(time.time()),
+    })
 
 
 @app.route("/")
@@ -163,10 +169,7 @@ def index():
     return send_from_directory("static", "index.html")
 
 
-# ========== 启动 ==========
-
 if __name__ == "__main__":
     import os
-
     port = int(os.environ.get("PORT", 5000))
-    socketio.run(app, host="0.0.0.0", port=port, allow_unsafe_werkzeug=True)
+    app.run(host="0.0.0.0", port=port)
