@@ -16,7 +16,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ---------- 中继状态 ----------
-RELAY_TIMEOUT = 15  # 中继超时（秒）
+RELAY_TIMEOUT = 35  # 中继超时（秒）
 _pending = {}  # {req_id: {"query": str, "event": Event, "result": list, "ts": float}}
 _lock = threading.Lock()
 _last_ping = 0  # PC 上次在线时间
@@ -83,8 +83,10 @@ def relay_result():
         if req_id in _pending:
             _pending[req_id]["result"] = results
             _pending[req_id]["event"].set()
-            # 清理旧请求
+            logger.info(f"中继结果 #{req_id}: {len(results)} 本")
             _cleanup_old()
+        else:
+            logger.warning(f"收到未知请求 #{req_id} （可能已超时）")
     return jsonify({"ok": True})
 
 
