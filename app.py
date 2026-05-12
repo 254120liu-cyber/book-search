@@ -16,15 +16,20 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ---------- 配置 ----------
-ZLIB_DOMAINS = [
-    "https://z-lib.id",
-    "https://z-lib.fm",
-    "https://z-lib.is",
-    "https://1lib.sk",
-    "https://b-ok.org",
+SEARCH_SOURCES = [
+    {
+        "name": "Anna's Archive",
+        "url": "https://annas-archive.org",
+        "search_path": "/search",
+    },
+    {
+        "name": "Library Genesis",
+        "url": "https://libgen.is",
+        "search_path": "/search.php",
+        "params": {"req": "{query}", "res": "25", "column": "def"},
+    },
 ]
-SEARCH_TIMEOUT = 20
-CACHE_TTL = 300  # 搜索结果缓存 5 分钟
+SEARCH_TIMEOUT = 25
 
 # 易支付配置（后续填入）
 YIPAY_PID = ""
@@ -32,80 +37,115 @@ YIPAY_KEY = ""
 YIPAY_API = "https://api.epay.ai/"
 
 
-# ========== Z-Library 搜索引擎 ==========
+# ========== 搜索引擎 ==========
 
 def _session():
     s = requests.Session()
     s.headers.update(
         {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8,en-US;q=0.7",
-            "Accept-Encoding": "gzip, deflate, br",
-            "Cache-Control": "no-cache",
-            "Sec-Ch-Ua": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
-            "Sec-Ch-Ua-Mobile": "?0",
-            "Sec-Ch-Ua-Platform": '"Windows"',
-            "Upgrade-Insecure-Requests": "1",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
         }
     )
     s.timeout = SEARCH_TIMEOUT
     return s
 
 
-def _search_one_domain(query, domain, limit=20):
-    """在单个 Z-Library 域名上搜索"""
+def _search_annas_archive(query, source, limit=20):
+    """搜索 Anna's Archive"""
     s = _session()
-    url = f"{domain}/s/"
+    url = f"{source['url']}{source['search_path']}"
     resp = s.get(url, params={"q": query})
     resp.raise_for_status()
 
     soup = BeautifulSoup(resp.text, "html.parser")
     results = []
 
-    for a in soup.select("h3 a[href*='/book/']"):
+    # Anna's Archive: 书链接格式 /md5/xxxxx
+    for a in soup.select("a[href*='/md5/']"):
         if len(results) >= limit:
             break
         title = a.get_text(strip=True)
         href = a.get("href", "")
-        if not title or not href:
+        if not title or len(title) < 3:
             continue
 
-        # 向上找到书籍条目容器
-        container = a
-        for _ in range(6):
-            container = container.parent
-            if container and len(container.get_text(strip=True)) > 80:
-                break
-        info = container.get_text("\n", strip=True) if container else ""
+        # 找父容器获取详细信息
+        parent = a.find_parent("div")
+        info = parent.get_text("\n", strip=True) if parent else ""
 
-        book = _parse_book(title, href, info, domain)
+        book = _parse_book_info(title, href, info, source["url"])
         if book:
             results.append(book)
 
     return results
 
 
-def _parse_book(title, href, info, domain):
+def _search_libgen(query, source, limit=20):
+    """搜索 Library Genesis"""
+    s = _session()
+    url = f"{source['url']}{source['search_path']}"
+    params = {k: v.replace("{query}", query) for k, v in source["params"].items()}
+    resp = s.get(url, params=params)
+    resp.raise_for_status()
+
+    soup = BeautifulSoup(resp.text, "html.parser")
+    results = []
+
+    # LibGen: 结果在 table 中
+    for row in soup.select("table.c tr")[1:]:  # 跳过表头
+        if len(results) >= limit:
+            break
+        cells = row.find_all("td")
+        if len(cells) < 8:
+            continue
+        title_cell = cells[2]
+        a = title_cell.find("a")
+        if not a:
+            continue
+        title = a.get_text(strip=True)
+        href = a.get("href", "")
+
+        author = cells[1].get_text(strip=True)
+        publisher = cells[3].get_text(strip=True)
+        year = cells[4].get_text(strip=True)
+        filesize = cells[7].get_text(strip=True)
+        filetype = cells[8].get_text(strip=True) if len(cells) > 8 else "?"
+
+        url = href if href.startswith("http") else source["url"] + href
+
+        results.append(
+            {
+                "title": title[:100],
+                "author": author[:60] or "未知",
+                "filetype": filetype.upper(),
+                "filesize": filesize,
+                "year": year,
+                "url": url,
+            }
+        )
+
+    return results
+
+
+def _parse_book_info(title, href, info, base_url):
     """解析单本书信息"""
-    # 去除书名重复后的文本
     rest = info.replace(title, "", 1)
 
     # 作者
     author = "未知"
     lines = [l.strip() for l in rest.split("\n") if l.strip() and len(l.strip()) > 2]
     if lines:
-        # 第一行非空通常包含作者信息
         first = lines[0]
-        # 排除格式/大小行
-        if not re.search(r"MB|GB|KB|PDF|EPUB|TXT|MOBI", first, re.I):
+        if not re.search(r"MB|GB|KB|PDF|EPUB|TXT|MOBI|\d{4}", first, re.I):
             author = first[:60]
         elif len(lines) > 1:
             author = lines[1][:60]
 
     # 格式
     filetype = "?"
-    for fmt in ["PDF", "EPUB", "MOBI", "AZW3", "DJVU", "TXT", "FB2", "FB2.ZIP"]:
+    for fmt in ["PDF", "EPUB", "MOBI", "AZW3", "DJVU", "TXT", "FB2"]:
         if fmt.lower() in info.lower():
             filetype = fmt
             break
@@ -122,7 +162,7 @@ def _parse_book(title, href, info, domain):
     if m:
         year = m.group(1)
 
-    url = href if href.startswith("http") else domain + href
+    url = href if href.startswith("http") else base_url + href
 
     return {
         "title": title,
@@ -134,33 +174,31 @@ def _parse_book(title, href, info, domain):
     }
 
 
-def search_zlib(query, limit=20):
-    """搜索 Z-Library，自动切换域名"""
+def search_books(query, limit=20):
+    """搜索电子书，自动切换数据源"""
     errors = []
-    for domain in ZLIB_DOMAINS:
+    for src in SEARCH_SOURCES:
         try:
-            results = _search_one_domain(query, domain, limit)
+            if "annas-archive" in src["url"]:
+                results = _search_annas_archive(query, src, limit)
+            else:
+                results = _search_libgen(query, src, limit)
+
             if results:
-                logger.info(f"搜索成功: {domain}, q={query}, {len(results)} 结果")
+                logger.info(f"搜索成功: {src['name']}, q={query}, {len(results)} 结果")
                 return results
-        except requests.exceptions.Timeout as e:
-            msg = f"{domain}: 连接超时"
-            errors.append(msg)
-            logger.warning(msg)
+        except requests.exceptions.Timeout:
+            errors.append(f"{src['name']}: 超时")
         except requests.exceptions.ConnectionError as e:
-            msg = f"{domain}: 无法连接 - {str(e)[:100]}"
-            errors.append(msg)
-            logger.warning(msg)
+            errors.append(f"{src['name']}: 连接失败")
+            logger.warning(f"{src['name']} 连接失败: {e}")
         except requests.exceptions.HTTPError as e:
-            sc = getattr(e.response, 'status_code', '?')
-            body = getattr(e.response, 'text', '')[:200] if e.response else ''
-            msg = f"{domain}: HTTP {sc} - {body}"
-            errors.append(msg)
-            logger.warning(msg)
+            sc = getattr(e.response, "status_code", "?")
+            errors.append(f"{src['name']}: HTTP {sc}")
+            logger.warning(f"{src['name']} HTTP {sc}")
         except Exception as e:
-            msg = f"{domain}: {type(e).__name__} - {str(e)[:100]}"
-            errors.append(msg)
-            logger.warning(msg)
+            errors.append(f"{src['name']}: {type(e).__name__}")
+            logger.warning(f"{src['name']}: {e}")
     raise Exception(" | ".join(errors[:2]))
 
 
@@ -175,7 +213,7 @@ def api_search():
         return jsonify({"error": "搜索词过长"}), 400
 
     try:
-        results = search_zlib(q)
+        results = search_books(q)
         # 只返回必要字段，减少流量
         books = [
             {
