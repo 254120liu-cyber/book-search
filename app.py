@@ -103,7 +103,10 @@ def _cleanup_old():
 
 def search_books(query, limit=20):
     # 优先通过 PC 中继搜索 (Z-Library)
-    if _relay_online():
+    online = _relay_online()
+    logger.info(f"搜索: {query}, relay={online}, pending={len(_pending)}")
+
+    if online:
         req_id = str(uuid.uuid4())[:8]
         event = threading.Event()
 
@@ -111,18 +114,18 @@ def search_books(query, limit=20):
             _pending[req_id] = {
                 "query": query, "event": event, "result": None, "ts": time.time()
             }
+        logger.info(f"中继任务 #{req_id} 已入队，等待PC...")
 
-        # 等待 PC 拉取并返回结果
         if event.wait(timeout=RELAY_TIMEOUT):
             with _lock:
                 info = _pending.pop(req_id, {})
             result = info.get("result")
+            logger.info(f"中继 #{req_id} 完成: {len(result) if result else 'None'}")
             if result is not None:
-                logger.info(f"Z-Library(PC): {len(result)} 结果")
                 return result[:limit]
-            # result 为空列表说明搜了但没找到——直接返回空
-            logger.info(f"Z-Library(PC): 0 结果")
             return []
+        else:
+            logger.warning(f"中继 #{req_id} 超时")
 
     # 备用 Open Library
     try:
@@ -130,10 +133,9 @@ def search_books(query, limit=20):
         if results:
             logger.info(f"OpenLibrary 备用: {len(results)} 结果")
             return results
-        raise Exception("OpenLibrary 返回空结果")
     except Exception as e:
         logger.warning(f"搜索异常: {e}")
-        return []
+    return []
 
 
 # ---------- Flask API ----------
