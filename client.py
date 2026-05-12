@@ -1,32 +1,30 @@
 """
 搜书中继客户端 — 在你电脑上运行
-连接 Render WebSocket，接收搜索请求 → 通过 Sakuracat 代理搜 Z-Library → 返回结果
+启动后自动连接 Render WebSocket，接收搜索请求 → 通过 Sakuracat 代理搜 Z-Library → 返回结果
 """
+import os
+os.environ["HTTP_PROXY"] = "http://127.0.0.1:7897"
+os.environ["HTTPS_PROXY"] = "http://127.0.0.1:7897"
+
 import re
 import time
-import sys
-import threading
-
 import socketio
 from curl_cffi import requests as curl_requests
 from bs4 import BeautifulSoup
 
 # ---------- 配置 ----------
 RENDER_URL = "https://book-search-xs91.onrender.com"
-PROXY = "http://127.0.0.1:7897"
 ZLIB_DOMAINS = ["https://z-lib.id", "https://z-lib.fm"]
 
 
-# ---------- Z-Library 搜索 ----------
-
 def search_zlib(query, limit=25):
-    """通过 Sakuracat 代理搜索 Z-Library"""
+    """通过代理搜索 Z-Library"""
     for domain in ZLIB_DOMAINS:
         try:
             resp = curl_requests.get(
                 f"{domain}/s/",
                 params={"q": query},
-                proxy=PROXY,
+                proxy="http://127.0.0.1:7897",
                 impersonate="chrome131",
                 timeout=25,
             )
@@ -79,12 +77,10 @@ def search_zlib(query, limit=25):
                     year = m.group(1)
 
                 url = href if href.startswith("http") else domain + href
-
                 results.append({
                     "title": title, "author": author,
                     "filetype": filetype, "filesize": size,
-                    "year": year, "url": url,
-                    "id": str(hash(url)),
+                    "year": year, "url": url, "id": str(hash(url)),
                 })
 
             if results:
@@ -102,17 +98,12 @@ sio = socketio.Client(reconnection=True, reconnection_delay=5, reconnection_dela
 
 @sio.on("connect")
 def on_connect():
-    print(f"[WS] 已连接 Render，等待搜索请求...", flush=True)
+    print("[WS] 已连接 Render，等待搜索请求...", flush=True)
 
 
 @sio.on("disconnect")
 def on_disconnect():
-    print(f"[WS] 断开，自动重连中...", flush=True)
-
-
-@sio.on("welcome")
-def on_welcome(data):
-    print(f"[WS] {data.get('msg', '')}", flush=True)
+    print("[WS] 断开，自动重连中...", flush=True)
 
 
 @sio.on("search")
@@ -120,35 +111,30 @@ def on_search(data):
     req_id = data.get("id", "")
     query = data.get("q", "")
     print(f"[搜索] #{req_id}: {query}", flush=True)
-
     try:
         results = search_zlib(query)
         print(f"[搜索] #{req_id}: 返回 {len(results)} 本", flush=True)
         sio.emit("search_result", {"id": req_id, "results": results})
     except Exception as e:
-        print(f"[搜索] #{req_id}: 出错 - {e}", flush=True)
+        print(f"[搜索] #{req_id}: 出错 {e}", flush=True)
         sio.emit("search_result", {"id": req_id, "results": []})
 
 
-# ---------- 启动 ----------
-
 def main():
     print("=" * 50, flush=True)
-    print("搜书中继客户端 v1.0", flush=True)
-    print(f"连接目标: {RENDER_URL}", flush=True)
-    print(f"代理: {PROXY}", flush=True)
+    print("搜书中继客户端 v2.0", flush=True)
+    print(f"目标: {RENDER_URL}", flush=True)
     print("=" * 50, flush=True)
-
     while True:
         try:
-            print(f"[WS] 正在连接...", flush=True)
+            print("[WS] 连接中...", flush=True)
             sio.connect(RENDER_URL, wait_timeout=10)
             sio.wait()
         except KeyboardInterrupt:
-            print("\n[退出] 用户中断", flush=True)
+            print("\n中断退出", flush=True)
             break
         except Exception as e:
-            print(f"[WS] 连接失败: {e}，10秒后重试...", flush=True)
+            print(f"[WS] 失败: {e}，10秒后重试", flush=True)
             time.sleep(10)
 
 
