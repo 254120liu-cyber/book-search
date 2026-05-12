@@ -91,15 +91,17 @@ def search_zlib(query, limit=25):
 
 
 def post_result(req_id, results):
-    """将搜索结果发回 Render"""
+    """将搜索结果发回 Render（直连不要代理）"""
     try:
         requests.post(
             f"{RENDER}/api/relay/result",
             json={"id": req_id, "results": results},
-            timeout=10,
+            proxies={"http": None, "https": None},  # 直连 Render
+            timeout=15,
         )
+        print(f"[上报] #{req_id} 成功", flush=True)
     except Exception as e:
-        print(f"[上报] 失败: {e}", flush=True)
+        print(f"[上报] #{req_id} 失败: {e}", flush=True)
 
 
 def main():
