@@ -16,20 +16,8 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ---------- 配置 ----------
-SEARCH_SOURCES = [
-    {
-        "name": "Anna's Archive",
-        "url": "https://annas-archive.org",
-        "search_path": "/search",
-    },
-    {
-        "name": "Library Genesis",
-        "url": "https://libgen.is",
-        "search_path": "/search.php",
-        "params": {"req": "{query}", "res": "25", "column": "def"},
-    },
-]
-SEARCH_TIMEOUT = 25
+AA_URL = "https://annas-archive.org"
+SEARCH_TIMEOUT = 30
 
 # 易支付配置（后续填入）
 YIPAY_PID = ""
@@ -52,17 +40,16 @@ def _session():
     return s
 
 
-def _search_annas_archive(query, source, limit=20):
+def search_books(query, limit=20):
     """搜索 Anna's Archive"""
     s = _session()
-    url = f"{source['url']}{source['search_path']}"
+    url = f"{AA_URL}/search"
     resp = s.get(url, params={"q": query})
     resp.raise_for_status()
 
     soup = BeautifulSoup(resp.text, "html.parser")
     results = []
 
-    # Anna's Archive: 书链接格式 /md5/xxxxx
     for a in soup.select("a[href*='/md5/']"):
         if len(results) >= limit:
             break
@@ -71,135 +58,53 @@ def _search_annas_archive(query, source, limit=20):
         if not title or len(title) < 3:
             continue
 
-        # 找父容器获取详细信息
         parent = a.find_parent("div")
         info = parent.get_text("\n", strip=True) if parent else ""
 
-        book = _parse_book_info(title, href, info, source["url"])
-        if book:
-            results.append(book)
+        # 作者
+        author = "未知"
+        rest = info.replace(title, "", 1)
+        lines = [l.strip() for l in rest.split("\n") if l.strip() and len(l.strip()) > 2]
+        if lines:
+            first = lines[0]
+            if not re.search(r"MB|GB|KB|PDF|EPUB|TXT|MOBI|\d{4}", first, re.I):
+                author = first[:60]
+            elif len(lines) > 1:
+                author = lines[1][:60]
 
-    return results
+        # 格式
+        filetype = "?"
+        for fmt in ["PDF", "EPUB", "MOBI", "AZW3", "DJVU", "TXT", "FB2"]:
+            if fmt.lower() in info.lower():
+                filetype = fmt
+                break
 
+        # 大小
+        size = "未知"
+        m = re.search(r"(\d+\.?\d*\s*(MB|GB|KB))", info, re.I)
+        if m:
+            size = m.group(1).upper()
 
-def _search_libgen(query, source, limit=20):
-    """搜索 Library Genesis"""
-    s = _session()
-    url = f"{source['url']}{source['search_path']}"
-    params = {k: v.replace("{query}", query) for k, v in source["params"].items()}
-    resp = s.get(url, params=params)
-    resp.raise_for_status()
+        # 年份
+        year = ""
+        m = re.search(r"\b(19\d{2}|20\d{2})\b", info)
+        if m:
+            year = m.group(1)
 
-    soup = BeautifulSoup(resp.text, "html.parser")
-    results = []
-
-    # LibGen: 结果在 table 中
-    for row in soup.select("table.c tr")[1:]:  # 跳过表头
-        if len(results) >= limit:
-            break
-        cells = row.find_all("td")
-        if len(cells) < 8:
-            continue
-        title_cell = cells[2]
-        a = title_cell.find("a")
-        if not a:
-            continue
-        title = a.get_text(strip=True)
-        href = a.get("href", "")
-
-        author = cells[1].get_text(strip=True)
-        publisher = cells[3].get_text(strip=True)
-        year = cells[4].get_text(strip=True)
-        filesize = cells[7].get_text(strip=True)
-        filetype = cells[8].get_text(strip=True) if len(cells) > 8 else "?"
-
-        url = href if href.startswith("http") else source["url"] + href
+        url = href if href.startswith("http") else AA_URL + href
 
         results.append(
             {
-                "title": title[:100],
-                "author": author[:60] or "未知",
-                "filetype": filetype.upper(),
-                "filesize": filesize,
+                "title": title,
+                "author": author,
+                "filetype": filetype,
+                "filesize": size,
                 "year": year,
                 "url": url,
             }
         )
 
     return results
-
-
-def _parse_book_info(title, href, info, base_url):
-    """解析单本书信息"""
-    rest = info.replace(title, "", 1)
-
-    # 作者
-    author = "未知"
-    lines = [l.strip() for l in rest.split("\n") if l.strip() and len(l.strip()) > 2]
-    if lines:
-        first = lines[0]
-        if not re.search(r"MB|GB|KB|PDF|EPUB|TXT|MOBI|\d{4}", first, re.I):
-            author = first[:60]
-        elif len(lines) > 1:
-            author = lines[1][:60]
-
-    # 格式
-    filetype = "?"
-    for fmt in ["PDF", "EPUB", "MOBI", "AZW3", "DJVU", "TXT", "FB2"]:
-        if fmt.lower() in info.lower():
-            filetype = fmt
-            break
-
-    # 大小
-    size = "未知"
-    m = re.search(r"(\d+\.?\d*\s*(MB|GB|KB))", info, re.I)
-    if m:
-        size = m.group(1).upper()
-
-    # 年份
-    year = ""
-    m = re.search(r"\b(19\d{2}|20\d{2})\b", info)
-    if m:
-        year = m.group(1)
-
-    url = href if href.startswith("http") else base_url + href
-
-    return {
-        "title": title,
-        "author": author,
-        "filetype": filetype,
-        "filesize": size,
-        "year": year,
-        "url": url,
-    }
-
-
-def search_books(query, limit=20):
-    """搜索电子书，自动切换数据源"""
-    errors = []
-    for src in SEARCH_SOURCES:
-        try:
-            if "annas-archive" in src["url"]:
-                results = _search_annas_archive(query, src, limit)
-            else:
-                results = _search_libgen(query, src, limit)
-
-            if results:
-                logger.info(f"搜索成功: {src['name']}, q={query}, {len(results)} 结果")
-                return results
-        except requests.exceptions.Timeout:
-            errors.append(f"{src['name']}: 超时")
-        except requests.exceptions.ConnectionError as e:
-            errors.append(f"{src['name']}: 连接失败")
-            logger.warning(f"{src['name']} 连接失败: {e}")
-        except requests.exceptions.HTTPError as e:
-            sc = getattr(e.response, "status_code", "?")
-            errors.append(f"{src['name']}: HTTP {sc}")
-            logger.warning(f"{src['name']} HTTP {sc}")
-        except Exception as e:
-            errors.append(f"{src['name']}: {type(e).__name__}")
-            logger.warning(f"{src['name']}: {e}")
-    raise Exception(" | ".join(errors[:2]))
 
 
 # ========== Flask API ==========
