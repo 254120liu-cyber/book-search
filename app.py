@@ -1,43 +1,29 @@
 """
-电子书搜索后端 — 通过中继服务器搜索 Z-Library + Open Library 备用
-部署于 Render（美国）
+电子书搜索后端 — Render 部署版
+PC 通过 WebSocket 连接，接收 Z-Library 搜索请求
+PC 不在线时自动降级到 Open Library
 """
 import time
 import logging
+import threading
 
 import requests
 from flask import Flask, request, jsonify, send_from_directory
+from flask_socketio import SocketIO, emit
 
 app = Flask(__name__, static_folder="static")
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ---------- 配置 ----------
-RELAY_URL = "http://140.143.165.47:5001"  # 搜索中继（你电脑上的 Z-Library 搜索）
+# ---------- 中继状态 ----------
+relay_connected = False
+relay_lock = threading.Lock()
 SEARCH_TIMEOUT = 30
 
-# 易支付配置（后续填入）
-YIPAY_PID = ""
-YIPAY_KEY = ""
-YIPAY_API = "https://api.epay.ai/"
-
-
-# ========== 搜索引擎 ==========
-
-def _search_relay(query, limit=20):
-    """通过中继搜索 Z-Library"""
-    resp = requests.get(
-        f"{RELAY_URL}/search",
-        params={"q": query},
-        timeout=SEARCH_TIMEOUT,
-    )
-    resp.raise_for_status()
-    data = resp.json()
-    return data.get("results", [])[:limit]
-
+# ---------- Open Library 备用 ----------
 
 def _search_openlib(query, limit=20):
-    """搜索 Open Library JSON API（中继不可用时备用）"""
     resp = requests.get(
         "https://openlibrary.org/search.json",
         params={"q": query, "limit": limit, "language": "chi,eng"},
@@ -51,27 +37,81 @@ def _search_openlib(query, limit=20):
         author = ", ".join(doc.get("author_name", ["未知"]))[:80]
         year = str(doc.get("first_publish_year", ""))
         olid = doc.get("edition_key", [""])[0] if doc.get("edition_key") else ""
-        url = f"https://openlibrary.org/books/{olid}" if olid else ""
         results.append({
             "title": title[:100], "author": author,
             "filetype": "?", "filesize": "未知",
-            "year": year, "url": url,
+            "year": year, "url": f"https://openlibrary.org/books/{olid}" if olid else "",
+            "id": str(hash(olid or title)),
         })
         if len(results) >= limit:
             break
     return results
 
 
+# ---------- WebSocket 中继 ----------
+
+@socketio.on("connect")
+def on_connect():
+    global relay_connected
+    with relay_lock:
+        relay_connected = True
+    logger.info("中继已连接 (PC 在线)")
+    emit("welcome", {"msg": "connected to Render"})
+
+
+@socketio.on("disconnect")
+def on_disconnect():
+    global relay_connected
+    with relay_lock:
+        relay_connected = False
+    logger.info("中继已断开 (PC 离线)")
+
+
+@socketio.on("search_result")
+def on_search_result(data):
+    """PC 返回搜索结果，存入等待队列"""
+    req_id = data.get("id")
+    if req_id and req_id in _pending:
+        _pending[req_id]["result"] = data.get("results", [])
+        _pending[req_id]["event"].set()
+
+
+_pending = {}  # {req_id: {"event": threading.Event, "result": None}}
+
+
+def _relay_search(query, timeout=SEARCH_TIMEOUT):
+    """通过 WebSocket 向 PC 中继发送搜索请求"""
+    import uuid
+
+    req_id = str(uuid.uuid4())[:8]
+    event = threading.Event()
+    _pending[req_id] = {"event": event, "result": None}
+
+    socketio.emit("search", {"id": req_id, "q": query})
+
+    if event.wait(timeout=timeout):
+        result = _pending.pop(req_id, {}).get("result")
+        if result:
+            return result
+    _pending.pop(req_id, None)
+    raise Exception("中继搜索超时")
+
+
+# ---------- 搜索入口 ----------
+
 def search_books(query, limit=20):
-    """搜索电子书：先中继(Z-Library)，后 Open Library"""
-    # 优先中继 (Z-Library)
-    try:
-        results = _search_relay(query, limit)
-        if results:
-            logger.info(f"中继搜索成功: {len(results)} 结果")
-            return results
-    except Exception as e:
-        logger.warning(f"中继不可用: {e}")
+    # 优先 WebSocket 中继 (Z-Library)
+    with relay_lock:
+        pc_online = relay_connected
+
+    if pc_online:
+        try:
+            results = _relay_search(query)
+            if results:
+                logger.info(f"Z-Library(PC): {len(results)} 结果")
+                return results[:limit]
+        except Exception as e:
+            logger.warning(f"中继搜索失败: {e}")
 
     # 备用 Open Library
     try:
@@ -79,13 +119,12 @@ def search_books(query, limit=20):
         if results:
             logger.info(f"OpenLibrary 备用: {len(results)} 结果")
             return results
+        raise Exception("OpenLibrary 返回空结果")
     except Exception as e:
-        logger.warning(f"OpenLibrary 失败: {e}")
-
-    raise Exception("所有搜索源不可用，请稍后重试")
+        raise Exception(f"所有搜索源不可用: {e}")
 
 
-# ========== Flask API ==========
+# ---------- Flask API ----------
 
 @app.route("/api/search")
 def api_search():
@@ -94,17 +133,13 @@ def api_search():
         return jsonify({"error": "请输入书名或关键词"}), 400
     if len(q) > 200:
         return jsonify({"error": "搜索词过长"}), 400
-
     try:
         results = search_books(q)
         books = [
             {
-                "title": r["title"],
-                "author": r["author"],
-                "filetype": r["filetype"],
-                "filesize": r["filesize"],
-                "year": r["year"],
-                "id": str(hash(r["url"])),
+                "title": r["title"], "author": r["author"],
+                "filetype": r.get("filetype", "?"), "filesize": r.get("filesize", "未知"),
+                "year": r.get("year", ""), "id": r.get("id", str(hash(r.get("url", "")))),
             }
             for r in results
         ]
@@ -116,7 +151,8 @@ def api_search():
 
 @app.route("/api/health")
 def api_health():
-    return jsonify({"status": "ok", "time": int(time.time())})
+    pc = "online" if relay_connected else "offline"
+    return jsonify({"status": "ok", "relay": pc, "time": int(time.time())})
 
 
 @app.route("/")
@@ -130,4 +166,4 @@ if __name__ == "__main__":
     import os
 
     port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    socketio.run(app, host="0.0.0.0", port=port, allow_unsafe_werkzeug=True)
