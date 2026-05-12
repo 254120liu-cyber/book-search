@@ -140,7 +140,9 @@ def search_zlib(query, limit=20):
             errors.append(msg)
             logger.warning(msg)
         except requests.exceptions.HTTPError as e:
-            msg = f"{domain}: HTTP {e.response.status_code if hasattr(e, 'response') and e.response else '?'} - 服务不可用"
+            sc = getattr(e.response, 'status_code', '?')
+            body = getattr(e.response, 'text', '')[:200] if e.response else ''
+            msg = f"{domain}: HTTP {sc} - {body}"
             errors.append(msg)
             logger.warning(msg)
         except Exception as e:
