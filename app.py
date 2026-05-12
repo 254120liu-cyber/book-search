@@ -5,18 +5,22 @@
 import re
 import time
 import logging
-from functools import lru_cache
 
 import requests
 from bs4 import BeautifulSoup
-from flask import Flask, request, jsonify, send_from_directory, g
+from flask import Flask, request, jsonify, send_from_directory
 
 app = Flask(__name__, static_folder="static")
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ---------- 配置 ----------
-AA_URL = "https://annas-archive.org"
+AA_MIRRORS = [
+    "https://annas-archive.gs",
+    "https://annas-archive.se",
+    "https://annas-archive.li",
+    "https://annas-archive.org",
+]
 SEARCH_TIMEOUT = 30
 
 # 易支付配置（后续填入）
@@ -40,10 +44,10 @@ def _session():
     return s
 
 
-def search_books(query, limit=20):
-    """搜索 Anna's Archive"""
+def _search_aa_mirror(query, mirror, limit=20):
+    """在单个 Anna's Archive 镜像上搜索"""
     s = _session()
-    url = f"{AA_URL}/search"
+    url = f"{mirror}/search"
     resp = s.get(url, params={"q": query})
     resp.raise_for_status()
 
@@ -61,7 +65,6 @@ def search_books(query, limit=20):
         parent = a.find_parent("div")
         info = parent.get_text("\n", strip=True) if parent else ""
 
-        # 作者
         author = "未知"
         rest = info.replace(title, "", 1)
         lines = [l.strip() for l in rest.split("\n") if l.strip() and len(l.strip()) > 2]
@@ -72,39 +75,51 @@ def search_books(query, limit=20):
             elif len(lines) > 1:
                 author = lines[1][:60]
 
-        # 格式
         filetype = "?"
         for fmt in ["PDF", "EPUB", "MOBI", "AZW3", "DJVU", "TXT", "FB2"]:
             if fmt.lower() in info.lower():
                 filetype = fmt
                 break
 
-        # 大小
         size = "未知"
         m = re.search(r"(\d+\.?\d*\s*(MB|GB|KB))", info, re.I)
         if m:
             size = m.group(1).upper()
 
-        # 年份
         year = ""
         m = re.search(r"\b(19\d{2}|20\d{2})\b", info)
         if m:
             year = m.group(1)
 
-        url = href if href.startswith("http") else AA_URL + href
+        url = href if href.startswith("http") else mirror + href
 
-        results.append(
-            {
-                "title": title,
-                "author": author,
-                "filetype": filetype,
-                "filesize": size,
-                "year": year,
-                "url": url,
-            }
-        )
+        results.append({
+            "title": title,
+            "author": author,
+            "filetype": filetype,
+            "filesize": size,
+            "year": year,
+            "url": url,
+        })
 
     return results
+
+
+def search_books(query, limit=20):
+    """搜索电子书，自动切换可用数据源"""
+    errors = []
+    for mirror in AA_MIRRORS:
+        try:
+            results = _search_aa_mirror(query, mirror, limit)
+            if results:
+                logger.info(f"搜索成功: {mirror}, {len(results)} 结果")
+                return results
+        except Exception as e:
+            msg = f"{mirror}: {type(e).__name__}"
+            errors.append(msg)
+            logger.warning(msg)
+            continue
+    raise Exception(" | ".join(errors[:3]))
 
 
 # ========== Flask API ==========
