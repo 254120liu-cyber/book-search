@@ -140,12 +140,12 @@ def search_books(query, limit=20):
 
 @app.route("/api/search")
 def api_search():
-    q = request.args.get("q", "").strip()
-    if not q:
-        return jsonify({"error": "请输入书名或关键词"}), 400
-    if len(q) > 200:
-        return jsonify({"error": "搜索词过长"}), 400
     try:
+        q = request.args.get("q", "").strip()
+        if not q:
+            return jsonify({"error": "请输入书名或关键词"}), 400
+        if len(q) > 200:
+            return jsonify({"error": "搜索词过长"}), 400
         results = search_books(q)
         books = [
             {
@@ -157,8 +157,10 @@ def api_search():
         ]
         return jsonify({"query": q, "count": len(books), "results": books})
     except Exception as e:
-        logger.error(f"搜索异常: {e}")
-        return jsonify({"error": f"搜索失败: {str(e)[:200]}"}), 500
+        import traceback
+        tb = traceback.format_exc()[-500:]
+        logger.error(f"搜索崩溃: {tb}")
+        return jsonify({"error": str(e)[:200]}), 500
 
 
 @app.route("/api/health")
