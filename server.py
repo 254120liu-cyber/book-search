@@ -13,8 +13,11 @@ from flask import Flask, request, jsonify, send_from_directory
 
 app = Flask(__name__, static_folder="static")
 
-# Z-Library eAPI
-API_URL = "https://z-lib.fm/eapi/book/search"
+# Z-Library eAPI — 多域名
+API_URLS = [
+    "https://z-lib.fm/eapi/book/search",
+    "https://1lib.sk/eapi/book/search",
+]
 PROXY = {"http": "http://127.0.0.1:7897", "https": "http://127.0.0.1:7897"}
 API_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36",
@@ -33,18 +36,22 @@ def _get_session():
     return _session
 
 
-def _api_request(data, max_retries=4):
-    """调用 Z-Library API，带重试"""
-    for attempt in range(max_retries):
-        try:
-            s = _get_session()
-            r = s.post(API_URL, data=data, timeout=20)
-            if r.status_code == 200:
-                return r.json()
-        except Exception:
-            _session = None  # 重建 session
-            if attempt < max_retries - 1:
-                time.sleep((attempt + 1) * 1.5)
+def _api_request(data, max_retries=3):
+    """调用 Z-Library API，多域名 + 重试"""
+    for api_url in API_URLS:
+        for attempt in range(max_retries):
+            try:
+                s = _get_session()
+                r = s.post(api_url, data=data, timeout=15)
+                if r.status_code == 200:
+                    return r.json()
+            except Exception as e:
+                global _session
+                _session = None
+                last_err = str(e)[:80]
+                if attempt < max_retries - 1:
+                    time.sleep(1)
+        print(f"  [{api_url}] 失败: {last_err}", flush=True)
     return {"books": []}
 
 
